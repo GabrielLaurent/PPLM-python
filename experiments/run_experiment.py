@@ -1,76 +1,103 @@
+import argparse
 import torch
 import numpy as np
-from src.models.language_model import LanguageModel  # Assuming you have a LanguageModel class
-from src.models.discriminator import Discriminator  # Assuming you have a Discriminator class
-from src.pplm.pplm import PPLM  # Assuming you have a PPLM class
-from src.utils.generation import generate_text
-from src.utils.evaluation import calculate_perplexity, calculate_discriminator_score
+import os
+import json
 
+from src.pplm.pplm import PPLM
+from src.models.language_model import LanguageModel # Replace with actual LM loading
+# Assuming LanguageModel is a dummy class or has a loading method
 
-def run_experiment(language_model_config, discriminator_config, pplm_config, experiment_config):
-    # Initialize language model, discriminator, and PPLM
-    language_model = LanguageModel(**language_model_config)
-    discriminator = Discriminator(**discriminator_config)
-    pplm = PPLM(language_model, discriminator, **pplm_config)
+# Dummy LanguageModel class (replace this with actual LM loading when available)
+class LanguageModel:
+    def __init__(self):
+        pass
 
-    # Load models if specified
-    if experiment_config.get('load_language_model', None):
-        language_model.load_state_dict(torch.load(experiment_config['load_language_model']))
-    if experiment_config.get('load_discriminator', None):
-        discriminator.load_state_dict(torch.load(experiment_config['load_discriminator']))
+    def generate(self, context, length=20): # Simple generation method
+        # Replace with actual generation logic
+        generated_text = f"{context} {' '.join(['dummy' for _ in range(length)])}"
+        return generated_text
 
-    # Define generation parameters (example)
-    prompt = experiment_config.get('prompt', "The cat sat on the")
-    length = experiment_config.get('length', 50)
-    num_samples = experiment_config.get('num_samples', 10)
+def run_pplm_experiment(
+        seed=0, # Removed default values here to use parser defaults
+        num_samples=1,
+        length=20,
+        gamma=1.5,
+        kl_scale=0.01,
+        learning_rate=0.01,
+        step_size=0.02,
+        num_iterations=3,
+        pplm_input="This is",
+        target_attribute="positive",
+        experiment_name="default_experiment"
+):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    os.makedirs("outputs/" + experiment_name, exist_ok=True)
 
-    # Generation loop
-    generated_texts = []
+    # Load language model
+    lm = LanguageModel()
+
+    # Initialize PPLM
+    pplm = PPLM(lm, step_size=step_size, kl_scale=kl_scale) #passing step_size and kl_scale
+    
+    # Generate text
+    all_generations = []
     for i in range(num_samples):
-        generated_text = generate_text(pplm, prompt, length)
-        generated_texts.append(generated_text)
+        generated_text = pplm.generate(pplm_input, target_attribute, length=length, gamma=gamma, learning_rate=learning_rate, num_iterations = num_iterations)
+        all_generations.append(generated_text)
 
-        # Quantitative Evaluation
-        # Assume the generate_text function returns the tokenized sequence in addition to the text
-        # and that the actual ids are accessible at index 1 (adjust if needed).
-        # Example: generated_text = (text_string, token_ids)
-        if isinstance(generated_text, tuple):
-          text_string, token_ids = generated_text
-          perplexity = calculate_perplexity(language_model.forward(torch.tensor(token_ids).unsqueeze(0)).logits.squeeze(), torch.tensor(token_ids))
-          discriminator_score = calculate_discriminator_score(discriminator, torch.tensor(token_ids).unsqueeze(0))
+    # Save results
+    results = {
+        "seed": seed,
+        "num_samples": num_samples,
+        "length": length,
+        "gamma": gamma,
+        "kl_scale": kl_scale,
+        "learning_rate": learning_rate,
+        "step_size": step_size,
+        "num_iterations": num_iterations,
+        "pplm_input": pplm_input,
+        "target_attribute": target_attribute,
+        "generations": all_generations
+    }
 
-          print(f"Sample {i+1}:\nText: {text_string}\nPerplexity: {perplexity}\nDiscriminator Score: {discriminator_score}\n")
-        else:
-          print(f'Text generation function needs to return a tuple containing the text and token ids')
-          print(f"Sample {i+1}:\nText: {generated_text}\nPerplexity: N/A\nDiscriminator Score: N/A\n")
 
-    # Save generated texts (optional)
-    # ...
+    with open(f"outputs/{experiment_name}/results_{seed}.json", "w") as f:
+        json.dump(results, f, indent=4)
+        print(f"Results saved in outputs/{experiment_name}/results_{seed}.json")
+
 
 if __name__ == '__main__':
-    # Example configurations (replace with your actual configurations)
-    language_model_config = {
-        'vocab_size': 50257,  # Example value, replace with your actual vocab size
-        'n_embd': 768,        # Example value
-        'n_head': 12,         # Example value
-        'n_layer': 12        # Example value
-    }
-    discriminator_config = {
-        'input_size': 768,  # Example value, assuming the language model's embedding size for simplicity
-        'hidden_size': 256,  # Example value
-        'num_layers': 2      # Example value
-    }
-    pplm_config = {
-        'step_size': 0.02,
-        'kl_scale': 0.01,
-        'gm_scale': 0.95
-    }
-    experiment_config = {
-        'prompt': "The cat",
-        'length': 20,
-        'num_samples': 2, # Reduced for demonstration
-        'load_language_model': None,
-        'load_discriminator': None,
-    }
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--seed", type=int, default=0, help="Seed for random number generators")
+    parser.add_argument("--num_samples", type=int, default=1, help="Number of samples to generate")
+    parser.add_argument("--length", type=int, default=20, help="Length of the generated text")
+    parser.add_argument("--gamma", type=float, default=1.5, help="Gamma value for PPLM")
+    parser.add_argument("--kl_scale", type=float, default=0.01, help="KL scale for PPLM")
+    parser.add_argument("--learning_rate", type=float, default=0.01, help="Learning rate for PPLM")
+    parser.add_argument("--step_size", type=float, default=0.02, help="Step size for PPLM")
+    parser.add_argument("--num_iterations", type=int, default=3, help="Number of iterations for PPLM")
+    parser.add_argument("--pplm_input", type=str, default="This is", help="Input text for PPLM")
+    parser.add_argument("--target_attribute", type=str, default="positive", help="Target attribute for PPLM")
+    parser.add_argument("--experiment_name", type=str, default="default_experiment", help="Name of the experiment for output directory")
 
-    run_experiment(language_model_config, discriminator_config, pplm_config, experiment_config)
+    args = parser.parse_args()
+
+    #Run one experiment with set args, not looping
+    run_pplm_experiment(
+        seed=args.seed,
+        num_samples=args.num_samples,
+        length=args.length,
+        gamma=args.gamma,
+        kl_scale=args.kl_scale,
+        learning_rate=args.learning_rate,
+        step_size=args.step_size,
+        num_iterations=args.num_iterations,
+        pplm_input=args.pplm_input,
+        target_attribute=args.target_attribute,
+        experiment_name=args.experiment_name
+    )
+
+
+

@@ -1,67 +1,74 @@
 import torch
-from torch.autograd import Variable
+from torch.distributions import kl
+from tqdm import trange
 
-class PPLM:
-    def __init__(self, language_model, discriminator, step_size=0.01, kl_scale=0.01):
-        self.language_model = language_model
-        self.discriminator = discriminator
-        self.step_size = step_size
-        self.kl_scale = kl_scale
+# Assuming language_model and discriminator are defined elsewhere or imported
+# from src.models.language_model import LanguageModel
+# from src.models.discriminator import Discriminator
 
-    def generate_text(self, prompt, attribute, length=50, batch_size=1):
-        self.language_model.eval()  # Set to evaluation mode
-        self.discriminator.eval()
+def perturb_past(past, model, last, cond_text, unpert_past=None, temperature=1.0,
+                 top_k=10, sample=True,  discrim=None, stepsize=0.01, kl_scale=0.01, decay=False):
+    
+    if unpert_past is None:
+        unpert_past = past
+    
+    grad_norms = []
+    
+    for i in range(1):
+        past = past.clone().detach()
+        past.requires_grad = True
 
-        # Tokenize the prompt
-        tokenizer = self.language_model.tokenizer # Assuming language model has tokenizer
-        indexed_tokens = tokenizer.encode(prompt)
-        tokens_tensor = torch.tensor([indexed_tokens] * batch_size)
-        tokens_tensor = tokens_tensor.to(self.language_model.device)
+        logits, future_past = model(last.unsqueeze(0), past=past)
+        
+        unpert_logits, unpert_future_past = model(last.unsqueeze(0), past=unpert_past)
+        
+        kl_loss = kl(torch.log_softmax(logits, dim=-1), torch.log_softmax(unpert_logits, dim=-1)).mean()
+        
+        if discrim:
+            # Assuming discrim returns a scalar score for the current generated sequence
+            discrim_loss = -discrim(torch.softmax(logits, dim=-1))  # Minimize negative discriminator score
+        else:
+            discrim_loss = 0
+            
+        total_loss = kl_loss * kl_scale + discrim_loss
 
-        # Convert to variables to track gradients
-        past = None
-        generated = tokens_tensor
+        total_loss.backward() # Calculate gradients
+        
+        grad = past.grad
+        grad_norm = torch.norm(grad)
+        grad_norms.append(grad_norm.cpu().numpy())
 
-        for _ in range(length):
-            # Get the output logits and hidden states from the language model
-            outputs = self.language_model(generated, past_key_values=past, return_dict=True)
-            logits = outputs.logits
-            past = outputs.past_key_values
-            # Get the predicted token
-            last_token_logits = logits[:, -1, :]
-            probs = torch.softmax(last_token_logits, dim=-1)
+        past = past - stepsize * grad  # Perturb the past
+        if decay:
+            stepsize *= (1 - i / 10)  #Decay from 0.01 to 0.001
 
+        past = past.detach()
+        unpert_past = unpert_past.detach()
 
-            # Calculate the PPLM loss (negative log probability of the attribute being present)
-            attribute_score = self.discriminator(probs) # Changed input from generated[:, -1:] to probs
-            loss = -torch.log(attribute_score).mean() # Changed loss calculation and using mean
+    return past
 
+def generate_with_pplm(model, tokenizer, context_text, discrim=None, length=20, stepsize=0.01, kl_scale=0.01, temperature=1.0, top_k=10, sample=True, decay=False):
+    
+    context_ids = tokenizer.encode(context_text)
+    
+    past = None
+    last = torch.tensor([context_ids[-1]])
+    
+    generated_text = context_text
+    
+    for i in trange(length):
+        past = perturb_past(past, model, last, context_text, temperature=temperature, top_k=top_k, sample=sample, discrim=discrim, stepsize=stepsize, kl_scale=kl_scale, decay=decay)
 
-            # Calculate gradients with respect to the hidden states
-            self.language_model.zero_grad()
-            loss.backward(retain_graph=True)
+        logits, past = model(last.unsqueeze(0), past=past)
 
-            # Get the gradients of the hidden states
-            grad_modifier = self.step_size * torch.sign(past[0][0].grad.data)
+        if sample:
+            probs = torch.softmax(logits / temperature, dim=-1)
+            last = torch.multinomial(probs[0], num_samples=1)
+        else:
+            _, last = torch.topk(logits, k=1, dim=-1)
+            last = last.squeeze()
 
-            # Modify the hidden states (adjusting for tuple structure of 'past')
-            num_layers = len(past)
-            num_tensors = len(past[0])
-
-            for i in range(num_layers):
-                  for j in range(num_tensors):
-                      past[i][j] = past[i][j] - grad_modifier
-
-
-            # Sample the next token based on the modified hidden states
-            outputs = self.language_model(generated, past_key_values=past, return_dict=True)
-            logits = outputs.logits
-
-            last_token_logits = logits[:, -1, :]
-            probs = torch.softmax(last_token_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            generated = torch.cat((generated, next_token), dim=1)
-
-        # Decode the generated tokens
-        predicted_text = tokenizer.decode(generated[0].tolist())
-        return predicted_text
+        word = tokenizer.decode([last.item()])
+        generated_text += word
+        
+    return generated_text

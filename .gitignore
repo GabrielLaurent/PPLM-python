@@ -1,0 +1,8 @@
+*.pyc
+__pycache__/
+.DS_Store
+*.log
+/outputs
+/data
+private_doc/
+private_doc/*
